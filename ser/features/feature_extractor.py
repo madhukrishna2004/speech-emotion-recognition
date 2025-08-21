@@ -1,156 +1,115 @@
-"""
-Feature Extraction for Speech Emotion Recognition (SER) Tool
-
-This module provides functions to extract various audio features 
-(e.g., MFCC, chroma, mel, spectral contrast, tonnetz) from audio
-files. It includes both basic and extended feature extraction methods.
-
-Functions:
-    - extract_feature: Extracts features from an audio file.
-    - extended_extract_feature: Extracts features from audio frames
-        with extended audio frame handling.
-
-  
-"""
-
-from typing import List
-import os
-import logging
-import warnings
-
 import numpy as np
 import librosa
 import soundfile as sf
-from halo import Halo
+import os
+import logging
+import warnings
+from typing import List
 
 from ser.utils import get_logger, read_audio_file
 from ser.config import Config
 
-import os
-os.makedirs("./tmp", exist_ok=True)  # ← ensures folder exists
-
 logger: logging.Logger = get_logger(__name__)
 
+os.makedirs(Config.TMP_FOLDER, exist_ok=True)
 warnings.filterwarnings("ignore", message=".*The 'nopython' keyword.*")
-warnings.filterwarnings(
-    "ignore", message=".*is too large for input signal of length.*"
-)
 
 
-def extract_feature(file: str) -> np.ndarray:
+# -----------------------
+# Audio Augmentation Helpers
+# -----------------------
+def augment_audio(audio, sr):
+    """Apply random augmentations to improve generalization."""
+    # Random pitch shift
+    if np.random.rand() < 0.3:
+        steps = np.random.uniform(-2, 2)
+        audio = librosa.effects.pitch_shift(audio, sr, n_steps=steps)
+
+    # Random time stretch
+    if np.random.rand() < 0.3:
+        rate = np.random.uniform(0.9, 1.1)
+        audio = librosa.effects.time_stretch(audio, rate)
+
+    # Random noise injection
+    if np.random.rand() < 0.3:
+        noise = np.random.normal(0, 0.005, len(audio))
+        audio = audio + noise
+
+    return audio
+
+
+# -----------------------
+# SpecAugment for Mel
+# -----------------------
+def spec_augment(mel_spectrogram, num_masks=2, freq_masking=8, time_masking=8):
+    """Apply frequency and time masking to mel spectrogram."""
+    mel = mel_spectrogram.copy()
+    num_mel_channels, num_frames = mel.shape
+
+    for _ in range(num_masks):
+        # Frequency masking
+        f = np.random.randint(0, freq_masking)
+        f0 = np.random.randint(0, num_mel_channels - f)
+        mel[f0:f0 + f, :] = 0
+
+        # Time masking
+        t = np.random.randint(0, time_masking)
+        t0 = np.random.randint(0, num_frames - t)
+        mel[:, t0:t0 + t] = 0
+
+    return mel
+
+
+# -----------------------
+# Feature Extraction
+# -----------------------
+def extract_feature(file: str, augment: bool = False) -> np.ndarray:
     """
-    Extract features (mfcc, chroma, mel, contrast, tonnetz) from an audio file.
-
-    Arguments:
-        file (str): Path to the audio file.
-
-    Returns:
-        np.ndarray: Extracted features.
+    Extracts Mel-spectrogram features with optional augmentation and normalization.
+    Returns 2D array suitable for CNN input.
     """
-    audio: np.ndarray
-    sample_rate: float
     try:
-        audio, sample_rate = read_audio_file(file)
+        audio, sr = read_audio_file(file)
     except Exception as err:
-        logger.error(msg=f"Error reading file {file}: {err}")
-        raise err.with_traceback(err.__traceback__) from err
+        logger.error(f"Error reading file {file}: {err}")
+        return None
 
-    n_fft: int = min(len(audio), 2048)
-    stft: np.ndarray = np.abs(librosa.stft(audio, n_fft=n_fft))
-    result: np.ndarray = np.array([])
+    if augment:
+        audio = augment_audio(audio, sr)
 
-    try:
-        if Config.DEFAULT_FEATURE_CONFIG["mfcc"]:
-            mfccs: np.ndarray = np.mean(
-                librosa.feature.mfcc(
-                    y=audio, sr=sample_rate, n_mfcc=40, n_fft=n_fft
-                ).T,
-                axis=0,
-            )
-            result = np.hstack((result, mfccs))
+    # Compute Mel-spectrogram
+    mel_spec = librosa.feature.melspectrogram(y=audio, sr=sr, n_mels=128, fmax=8000)
+    mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max)
 
-        if Config.DEFAULT_FEATURE_CONFIG["chroma"]:
-            chroma: np.ndarray = np.mean(
-                librosa.feature.chroma_stft(
-                    S=stft, sr=sample_rate, n_fft=n_fft
-                ).T,
-                axis=0,
-            )
-            result = np.hstack((result, chroma))
+    if augment and np.random.rand() < 0.5:
+        mel_spec_db = spec_augment(mel_spec_db)
 
-        if Config.DEFAULT_FEATURE_CONFIG["mel"]:
-            mel: np.ndarray = np.mean(
-                librosa.feature.melspectrogram(
-                    y=audio, sr=sample_rate, n_fft=n_fft
-                ).T,
-                axis=0,
-            )
-            result = np.hstack((result, mel))
+    # Normalize per sample
+    mel_spec_db = (mel_spec_db - np.mean(mel_spec_db)) / (np.std(mel_spec_db) + 1e-6)
 
-        if Config.DEFAULT_FEATURE_CONFIG["contrast"]:
-            spectral_contrast: np.ndarray = np.mean(
-                librosa.feature.spectral_contrast(
-                    S=librosa.power_to_db(stft), sr=sample_rate, n_fft=n_fft
-                ).T,
-                axis=0,
-            )
-            result = np.hstack((result, spectral_contrast))
-
-        if Config.DEFAULT_FEATURE_CONFIG["tonnetz"]:
-            y: np.ndarray = librosa.effects.harmonic(audio)
-            tonnetz: np.ndarray = np.mean(
-                librosa.feature.tonnetz(y=y, sr=sample_rate).T, axis=0
-            )
-            result = np.hstack((result, tonnetz))
-    except Exception as err:
-        logger.error(msg=f"Error extracting features from file {file}: {err}")
-        raise err.with_traceback(err.__traceback__) from err
-
-    return result
+    return mel_spec_db.astype(np.float32)
 
 
-def extended_extract_feature(
-    audiofile: str, frame_size: int = 3, frame_stride: int = 1
-) -> List[np.ndarray]:
-    """
-    Extract features (mfcc, chroma, mel) from an audio file 
-    using extended audio frames.
+def extended_extract_feature(audiofile: str, frame_size: int = 3, frame_stride: int = 1, augment: bool = False) -> List[np.ndarray]:
+    """Extract features over sliding frames with augmentation."""
+    temp_filename = f"{Config.TMP_FOLDER}/temp.wav"
+    features_list = []
+    audio, sr = read_audio_file(audiofile)
+    frame_length = int(frame_size * sr)
+    frame_step = int(frame_stride * sr)
+    num_frames = int(np.ceil(len(audio) / frame_step))
 
-    Arguments:
-        audiofile (str) Path to the audio file.
-        mfcc (bool): Whether to include MFCC features.
-        chroma (bool): Whether to include chroma features.
-        mel (bool): Whether to include mel features.
-        frame_size (int, optional): Size of the frame in seconds,
-            by default 3.
-        frame_stride (int, optional): Stride between frames in 
-            seconds, by default 1.
-
-    Returns:
-        List[np.ndarray]: List of extracted features.
-    """
-    temp_filename: str = f"{Config.TMP_FOLDER}/temp.wav"
-    features: List[np.ndarray] = []
-    audio: np.ndarray
-    sample_rate: float
-    audio, sample_rate = read_audio_file(audiofile)
-    frame_length: int = int(frame_size * sample_rate)
-    frame_step: int = int(frame_stride * sample_rate)
-    num_frames: int = int(np.ceil(len(audio) / frame_step))
-    spinner = Halo(text="Processing", spinner="dots", text_color="green")
-
-    spinner.start()
     for frame in range(num_frames):
-        start: int = frame * frame_step
-        end: int = min(start + frame_length, len(audio))
-        frame_data: np.ndarray = audio[start:end]
+        start = frame * frame_step
+        end = min(start + frame_length, len(audio))
+        frame_data = audio[start:end]
 
-        sf.write(temp_filename, frame_data, sample_rate)
-        feature: np.ndarray = extract_feature(temp_filename)
-        features.append(feature)
+        sf.write(temp_filename, frame_data, sr)
+        feat = extract_feature(temp_filename, augment=augment)
+        if feat is not None:
+            features_list.append(feat)
 
         if os.path.exists(temp_filename):
             os.remove(temp_filename)
-    spinner.stop()
 
-    return features
+    return features_list

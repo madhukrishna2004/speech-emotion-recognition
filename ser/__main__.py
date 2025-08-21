@@ -6,15 +6,6 @@ tool. It provides command-line interface (CLI) options for training the
 emotion classification model or predicting emotions and generating transcripts
 from audio files.
 
-Usage:
-    The tool can be operated in two primary modes:
-    1. Training mode: Trains the model using labeled audio data.
-    2. Prediction mode: Predicts emotions in a given audio file 
-        and extracts the transcript.
-
-Author: Juan Sugg (juanpedrosugg@gmail.com)
-Version: 1.0
-License: MIT
 """
 
 import argparse

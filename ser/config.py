@@ -75,7 +75,7 @@ class Config:
     # Model configuration
     MODELS_CONFIG: dict[str, Any] = {
         "models_folder": "./ser/models",
-        "whisper_model": {"name": "tiny", "path": "OpenAI/whisper/"}
+        "whisper_model": {"name": "tiny", "path": "7"}
 ,
         "num_cores": os.cpu_count(),
     }
